@@ -1,0 +1,61 @@
+
+Vagrant.configure("2") do |config|
+
+  config.vm.box = "nomad-docker-box"
+
+  config.vm.provider "virtualbox" do |vb| 
+    vb.memory = "768"
+  end
+  
+  # nomad server-client nodes
+  (1..3).each do |i|
+    config.vm.define "nomad-node-#{i}" do |node|
+
+      # set hostname
+      node.vm.hostname = "nomad-node-#{i}"
+
+      # networking
+      node.vm.network "private_network", ip: "172.16.1.#{i+100}"
+      node.vm.network "forwarded_port", guest: 4646, host: 4646+i
+
+      # files to copy to vm
+      node.vm.provision "file", source: "./cluster_payload/nomad#{i}.hcl", destination: "$HOME/nomad.hcl"
+      node.vm.provision "file", source: "./cluster_payload/nomad.service", destination: "$HOME/nomad.service"
+
+      node.vm.provision "shell" do |shell|
+        shell.inline = <<-SHELL
+          # set host IP address on NOMAD_ADDR, allow nomad CLI to call itself.
+          echo NOMAD_ADDR="http://172.16.1.$1:4646" | sudo tee -a /etc/environment
+
+          # allow avahi-daemon to reconcile its real hostname nomad-node-n and broadcast
+          sudo systemctl restart avahi-daemon
+
+          # allow docker run without root
+          sudo usermod -aG docker $USER
+          
+          # configure and upload nomad files
+          sudo chmod 700 /etc/nomad.d
+          sudo mv /home/vagrant/nomad.hcl /etc/nomad.d/nomad.hcl
+          sudo mv /home/vagrant/nomad.service /etc/systemd/system/nomad.service
+
+          # start service
+          sudo systemctl enable nomad
+          sudo systemctl start nomad
+          echo 'waiting nomad to warm up'
+          sleep 10s
+          sudo systemctl status nomad
+
+          # allow nomad-node-2 and nomad-node-3 to join nomad-node-1
+          if [[ $2 -gt 1 ]] 
+          then
+            export NOMAD_ADDR="http://172.16.1.$1:4646"
+            nomad server join nomad-node-1.local
+          fi
+
+        SHELL
+        shell.args   = ["#{i+100}", "#{i}"]
+      end
+    end
+  end
+end
+
